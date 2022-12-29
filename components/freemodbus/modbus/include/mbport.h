@@ -1,4 +1,11 @@
 /*
+ * SPDX-FileCopyrightText: 2006 Christian Walter
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * SPDX-FileContributor: 2016-2022 Espressif Systems (Shanghai) CO LTD
+ */
+/*
  * FreeModbus Libary: A portable Modbus implementation for Modbus ASCII/RTU.
  * Copyright (c) 2006 Christian Walter <wolti@sil.at>
  * All rights reserved.
@@ -138,6 +145,10 @@ BOOL            xMBPortSerialGetByte( CHAR * pucByte );
 
 BOOL            xMBPortSerialPutByte( CHAR ucByte );
 
+BOOL            xMBPortSerialGetRequest( UCHAR **ppucMBSerialFrame, USHORT * pusSerialLength ) __attribute__ ((weak));
+
+BOOL            xMBPortSerialSendResponse( UCHAR *pucMBSerialFrame, USHORT usSerialLength ) __attribute__ ((weak));
+
 #if MB_MASTER_RTU_ENABLED || MB_MASTER_ASCII_ENABLED
 BOOL            xMBMasterPortSerialInit( UCHAR ucPort, ULONG ulBaudRate,
                                    UCHAR ucDataBits, eMBParity eParity );
@@ -151,6 +162,13 @@ void            vMBMasterPortSerialEnable( BOOL xRxEnable, BOOL xTxEnable );
 BOOL            xMBMasterPortSerialGetByte( CHAR * pucByte );
 
 BOOL            xMBMasterPortSerialPutByte( CHAR ucByte );
+
+BOOL            xMBMasterPortSerialGetResponse( UCHAR **ppucMBSerialFrame, USHORT * usSerialLength ); 
+
+BOOL            xMBMasterPortSerialSendRequest( UCHAR *pucMBSerialFrame, USHORT usSerialLength );
+
+void            vMBMasterRxFlushResp( void );
+
 #endif
 
 /* ----------------------- Timers functions ---------------------------------*/

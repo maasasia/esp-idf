@@ -1,16 +1,9 @@
-/* Copyright 2018 Espressif Systems (Shanghai) PTE LTD
+/*
+ * SPDX-FileCopyrightText: 2013 Armink
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileContributor: 2016-2021 Espressif Systems (Shanghai) CO LTD
  */
 /*
  * FreeModbus Libary: ESP32 Port
@@ -59,85 +52,201 @@
 #include "port_serial_master.h"
 
 /* ----------------------- Defines ------------------------------------------*/
+#define MB_SERIAL_RX_FLUSH_RETRY    (2)
+
+typedef struct {
+    portMUX_TYPE xSpinLock;
+    UCHAR ucUartNumber;
+    BOOL bRxStateEnabled;
+    BOOL bTxStateEnabled;
+    uint64_t xTransactionCount;
+    USHORT usRecvLength;
+    uint64_t xSendTimeStamp;
+    uint64_t xRecvTimeStamp;
+    uint32_t usFlags;
+    QueueHandle_t xMbUartQueue; // A queue to handle UART event.
+    TaskHandle_t  xMbTaskHandle; // UART task to handle UART event.
+    SemaphoreHandle_t xMasterSemaRxHandle; // Rx blocking semaphore handle
+} PortContext_t;
 
 /* ----------------------- Static variables ---------------------------------*/
 static const CHAR *TAG = "MB_MASTER_SERIAL";
 
-// A queue to handle UART event.
-static QueueHandle_t xMbUartQueue;
-static TaskHandle_t  xMbTaskHandle;
+// The UART hardware context
+static PortContext_t xPortContext = {
+        .xSpinLock = portMUX_INITIALIZER_UNLOCKED, \
+        .ucUartNumber= (UART_NUM_MAX - 1), \
+        .bRxStateEnabled = FALSE, \
+        .bTxStateEnabled = FALSE, \
+        .xRecvTimeStamp = 0, \
+        .xSendTimeStamp = 0, \
+        .xTransactionCount = 0, \
+        .usRecvLength = 0, \
+        .usFlags = 0, \
+        .xMbUartQueue = NULL, \
+        .xMbTaskHandle = NULL, \
+        .xMasterSemaRxHandle = NULL \
+};
 
-// The UART hardware port number
-static UCHAR ucUartNumber = UART_NUM_MAX - 1;
+// Function returns time left for response processing according to response timeout
+static IRAM_ATTR int64_t xMBSerialPortMasterGetRespTimeLeft(int64_t xTime)
+{
+    int64_t xStartTime = xTime;
+    if (xStartTime <= 0) {
+        xStartTime = esp_timer_get_time();
+    }
+    int64_t xTimeStamp = xStartTime - xPortContext.xSendTimeStamp;
+    int64_t xTimeLeft = (xTimeStamp > (1000 * MB_MASTER_TIMEOUT_MS_RESPOND)) ? 0 :
+            (MB_MASTER_TIMEOUT_MS_RESPOND - (xTimeStamp / 1000) - 1);
+    return xTimeLeft;
+}
 
-static BOOL bRxStateEnabled = FALSE; // Receiver enabled flag
-static BOOL bTxStateEnabled = FALSE; // Transmitter enabled flag
+static BOOL xMBMasterPortRxSemaInit( void )
+{
+    xPortContext.xMasterSemaRxHandle = xSemaphoreCreateBinary();
+    MB_PORT_CHECK((xPortContext.xMasterSemaRxHandle != NULL), FALSE , "%s: RX semaphore create failure.", __func__);
+    return TRUE;
+}
+
+static BOOL xMBMasterPortRxSemaTake( LONG lTimeOut )
+{
+    BaseType_t xStatus = pdTRUE;
+    xStatus = xSemaphoreTake(xPortContext.xMasterSemaRxHandle, lTimeOut );
+    MB_PORT_CHECK((xStatus == pdTRUE), FALSE , "%s: RX semaphore take failure.", __func__);
+    ESP_LOGV(MB_PORT_TAG,"%s:Take RX semaphore (%lu ticks).", __func__, lTimeOut);
+    return TRUE;
+}
+
+static void vMBMasterRxSemaRelease( void )
+{
+    BaseType_t xStatus = pdFALSE;
+    xStatus = xSemaphoreGive(xPortContext.xMasterSemaRxHandle);
+    if (xStatus != pdTRUE) {
+        ESP_LOGD(MB_PORT_TAG,"%s:RX semaphore is free.", __func__);
+    }
+}
+
+static BOOL vMBMasterRxSemaIsBusy( void )
+{
+    BaseType_t xStatus = pdFALSE;
+    xStatus = (uxSemaphoreGetCount(xPortContext.xMasterSemaRxHandle) == 0) ? TRUE : FALSE;
+    return xStatus;
+}
+
+static void vMBMasterRxFlush( void )
+{
+    size_t xSize = 1;
+    esp_err_t xErr = ESP_OK;
+    for (int xCount = 0; (xCount < MB_SERIAL_RX_FLUSH_RETRY) && xSize; xCount++) {
+        xErr = uart_get_buffered_data_len(xPortContext.ucUartNumber, &xSize);
+        MB_PORT_CHECK((xErr == ESP_OK), ; , "mb flush serial fail, error = 0x%x.", xErr);
+        BaseType_t xStatus = xQueueReset(xPortContext.xMbUartQueue);
+        if (xStatus) {
+            xErr = uart_flush_input(xPortContext.ucUartNumber);
+            MB_PORT_CHECK((xErr == ESP_OK), ; , "mb flush serial fail, error = 0x%x.", xErr);
+        }
+    }
+}
+
+void vMBMasterRxFlushResp( void )
+{
+    size_t xSize = 1;
+    esp_err_t xErr = ESP_OK;
+    int64_t xStartTime = esp_timer_get_time();
+    int64_t xTimeLeft = 0;
+    while( (xTimeLeft < (1000 * MB_MASTER_TIMEOUT_MS_RESPOND)) ){
+        xTimeLeft = esp_timer_get_time() - xStartTime;
+        xErr = uart_get_buffered_data_len(xPortContext.ucUartNumber, &xSize);
+        MB_PORT_CHECK((xErr == ESP_OK), ; , "mb flush serial fail, error = 0x%x.", xErr);
+        BaseType_t xStatus = xQueueReset(xPortContext.xMbUartQueue);
+        if (xStatus) {
+            xErr = uart_flush_input(xPortContext.ucUartNumber);
+            MB_PORT_CHECK((xErr == ESP_OK), ; , "mb flush serial fail, error = 0x%x.", xErr);
+        } 
+    }
+}
 
 void vMBMasterPortSerialEnable(BOOL bRxEnable, BOOL bTxEnable)
 {
     // This function can be called from xMBRTUTransmitFSM() of different task
     if (bTxEnable) {
-        bTxStateEnabled = TRUE;
+        xPortContext.bTxStateEnabled = TRUE;
     } else {
-        bTxStateEnabled = FALSE;
+        xPortContext.bTxStateEnabled = FALSE;
     }
     if (bRxEnable) {
-        bRxStateEnabled = TRUE;
-        vTaskResume(xMbTaskHandle); // Resume receiver task
+        xPortContext.bRxStateEnabled = TRUE;
+        vMBMasterRxSemaRelease();
+        vTaskResume(xPortContext.xMbTaskHandle); // Resume receiver task
     } else {
-        vTaskSuspend(xMbTaskHandle); // Block receiver task
-        bRxStateEnabled = FALSE;
+        vTaskSuspend(xPortContext.xMbTaskHandle); // Block receiver task
+        xPortContext.bRxStateEnabled = FALSE;
     }
 }
 
-static USHORT usMBMasterPortSerialRxPoll(size_t xEventSize)
+BOOL xMBMasterPortSerialGetResponse( UCHAR **ppucMBSerialFrame, USHORT * usSerialLength ) 
 {
-    BOOL xReadStatus = TRUE;
-    USHORT usCnt = 0;
+    USHORT usCount = xPortContext.usRecvLength;
+    BOOL xReadStatus = FALSE;
 
-    if (bRxStateEnabled) {
-        while(xReadStatus && (usCnt++ <= MB_SERIAL_BUF_SIZE)) {
-            // Call the Modbus stack callback function and let it fill the stack buffers.
-            xReadStatus = pxMBMasterFrameCBByteReceived(); // callback to receive FSM
-        }
+    MB_PORT_CHECK((ppucMBSerialFrame && usSerialLength), FALSE, "mb serial get buffer failure.");
+
+    xReadStatus = xMBMasterPortRxSemaTake(pdMS_TO_TICKS(xMBSerialPortMasterGetRespTimeLeft(0)));
+    if (xReadStatus && usCount && ppucMBSerialFrame) {
+        // Read frame data from the ringbuffer of receiver
+        usCount = uart_read_bytes(xPortContext.ucUartNumber, (uint8_t*)*ppucMBSerialFrame,
+                                    xPortContext.usRecvLength, pdMS_TO_TICKS(xMBSerialPortMasterGetRespTimeLeft(0)));
         // The buffer is transferred into Modbus stack and is not needed here any more
-        uart_flush_input(ucUartNumber);
-        ESP_LOGD(TAG, "Received data: %d(bytes in buffer)\n", (uint32_t)usCnt);
+        uart_flush_input(xPortContext.ucUartNumber);
+        ESP_LOGD(TAG, "Received data: %d(bytes in buffer)\n", (uint32_t)usCount);
+        xReadStatus = TRUE;
+        // Store the timestamp of received frame
+        xPortContext.xRecvTimeStamp = esp_timer_get_time();
+        ESP_LOG_BUFFER_HEX_LEVEL("RECEIVE", (void*)*ppucMBSerialFrame, usCount, ESP_LOG_DEBUG);
+        int64_t xTime = xPortContext.xRecvTimeStamp - xPortContext.xSendTimeStamp;
+        ESP_LOGD(TAG, "Request processing time[us] = %ju.", xTime);
     } else {
-        ESP_LOGE(TAG, "%s: bRxState disabled but junk data (%d bytes) received. ", __func__, xEventSize);
+        ESP_LOGE(TAG, "%s: Junk data (%d bytes) received. ", __func__, *usSerialLength);
     }
-    return usCnt;
+    *usSerialLength = usCount;
+    return xReadStatus;
 }
 
-BOOL xMBMasterPortSerialTxPoll(void)
+BOOL xMBMasterPortSerialSendRequest( UCHAR *pucMBSerialFrame, USHORT usSerialLength )
 {
-    USHORT usCount = 0;
-    BOOL bNeedPoll = TRUE;
+    BOOL xResult = FALSE;
+    int xCount = 0;
 
-    if( bTxStateEnabled ) {
-        // Continue while all response bytes put in buffer or out of buffer
-        while(bNeedPoll && (usCount++ < MB_SERIAL_BUF_SIZE)) {
-            // Calls the modbus stack callback function to let it fill the UART transmit buffer.
-            bNeedPoll = pxMBMasterFrameCBTransmitterEmpty( ); // callback to transmit FSM
-        }
-        ESP_LOGD(TAG, "MB_TX_buffer sent: (%d) bytes.", (uint16_t)(usCount - 1));
+    // The place to enable RS485 driver
+    vMBMasterPortSerialEnable( FALSE, TRUE );
+
+    if (pucMBSerialFrame && usSerialLength && xPortContext.bTxStateEnabled) {
+        // Flush buffer received from previous transaction
+        vMBMasterRxFlush();
+        xCount = uart_write_bytes(xPortContext.ucUartNumber, pucMBSerialFrame, usSerialLength);
+        ESP_LOGD(TAG, "MB_TX_buffer sent: (%d) bytes.", (uint16_t)(xCount - 1));
         // Waits while UART sending the packet
-        esp_err_t xTxStatus = uart_wait_tx_done(ucUartNumber, MB_SERIAL_TX_TOUT_TICKS);
-        vMBMasterPortSerialEnable( TRUE, FALSE );
+        esp_err_t xTxStatus = uart_wait_tx_done(xPortContext.ucUartNumber, MB_SERIAL_TX_TOUT_TICKS);
+        vMBMasterPortSerialEnable(TRUE, FALSE);
         MB_PORT_CHECK((xTxStatus == ESP_OK), FALSE, "mb serial sent buffer failure.");
-        return TRUE;
+        // Print sent packet, the tag used is more clear to see
+        ESP_LOG_BUFFER_HEX_LEVEL("SENT", (void*)pucMBSerialFrame, usSerialLength, ESP_LOG_DEBUG);
+        xMBMasterPortEventPost(EV_MASTER_FRAME_SENT);
+        xPortContext.xSendTimeStamp = esp_timer_get_time();
+        xResult = TRUE;
+    } else {
+        ESP_LOGE(TAG, "Send callback %d, %p, %d. ", xPortContext.bTxStateEnabled, pucMBSerialFrame, usSerialLength);
     }
-    return FALSE;
+    return xResult;
 }
 
 // UART receive event task
 static void vUartTask(void* pvParameters)
 {
     uart_event_t xEvent;
-    USHORT usResult = 0;
     for(;;) {
-        if (xQueueReceive(xMbUartQueue, (void*)&xEvent, portMAX_DELAY) == pdTRUE) {
-            ESP_LOGD(TAG, "MB_uart[%d] event:", ucUartNumber);
+        if (xMBPortSerialWaitEvent(xPortContext.xMbUartQueue, (void*)&xEvent, portMAX_DELAY)) {
+            ESP_LOGD(TAG, "MB_uart[%d] event:", xPortContext.ucUartNumber);
             switch(xEvent.type) {
                 //Event of UART receiving data
                 case UART_DATA:
@@ -145,23 +254,34 @@ static void vUartTask(void* pvParameters)
                     // This flag set in the event means that no more
                     // data received during configured timeout and UART TOUT feature is triggered
                     if (xEvent.timeout_flag) {
-                        // Read received data and send it to modbus stack
-                        usResult = usMBMasterPortSerialRxPoll(xEvent.size);
-                        ESP_LOGD(TAG,"Timeout occured, processed: %d bytes", usResult);
-                        // Block receiver task until data is not processed
-                        vTaskSuspend(NULL);
+                        // Response is received but previous packet processing is pending
+                        // Do not wait completion of processing and just discard received data as incorrect
+                        if (vMBMasterRxSemaIsBusy()) {
+                            vMBMasterRxFlush();
+                            break;
+                        }
+                        uart_get_buffered_data_len(xPortContext.ucUartNumber, (unsigned int*)&xEvent.size);
+                        xPortContext.usRecvLength = (xEvent.size < MB_SERIAL_BUF_SIZE) ? xEvent.size : MB_SERIAL_BUF_SIZE;
+                        if (xEvent.size <= MB_SER_PDU_SIZE_MIN) {
+                            ESP_LOGW(TAG,"Drop short packet %d byte(s)", xEvent.size);
+                            vMBMasterRxFlush();
+                            break;
+                        }
+                        // New frame is received, send event to main FSM
+                        xMBMasterPortEventPost(EV_MASTER_FRAME_RECEIVED);
+                        ESP_LOGD(TAG,"Received %d bytes in buffer.", xPortContext.usRecvLength);
                     }
                     break;
                 //Event of HW FIFO overflow detected
                 case UART_FIFO_OVF:
                     ESP_LOGD(TAG, "hw fifo overflow.");
-                    xQueueReset(xMbUartQueue);
+                    xQueueReset(xPortContext.xMbUartQueue);
                     break;
                 //Event of UART ring buffer full
                 case UART_BUFFER_FULL:
                     ESP_LOGD(TAG, "ring buffer full.");
-                    xQueueReset(xMbUartQueue);
-                    uart_flush_input(ucUartNumber);
+                    xQueueReset(xPortContext.xMbUartQueue);
+                    uart_flush_input(xPortContext.ucUartNumber);
                     break;
                 //Event of UART RX break detected
                 case UART_BREAK:
@@ -189,7 +309,7 @@ BOOL xMBMasterPortSerialInit( UCHAR ucPORT, ULONG ulBaudRate, UCHAR ucDataBits, 
 {
     esp_err_t xErr = ESP_OK;
     // Set communication port number
-    ucUartNumber = ucPORT;
+    xPortContext.ucUartNumber = ucPORT;
     // Configure serial communication parameters
     UCHAR ucParity = UART_PARITY_DISABLE;
     UCHAR ucData = UART_DATA_8_BITS;
@@ -234,35 +354,36 @@ BOOL xMBMasterPortSerialInit( UCHAR ucPORT, ULONG ulBaudRate, UCHAR ucDataBits, 
         .source_clk = UART_SCLK_APB,
     };
     // Set UART config
-    xErr = uart_param_config(ucUartNumber, &xUartConfig);
+    xErr = uart_param_config(xPortContext.ucUartNumber, &xUartConfig);
     MB_PORT_CHECK((xErr == ESP_OK),
             FALSE, "mb config failure, uart_param_config() returned (0x%x).", xErr);
     // Install UART driver, and get the queue.
-    xErr = uart_driver_install(ucUartNumber, MB_SERIAL_BUF_SIZE, MB_SERIAL_BUF_SIZE,
-                                    MB_QUEUE_LENGTH, &xMbUartQueue, MB_PORT_SERIAL_ISR_FLAG);
+    xErr = uart_driver_install(xPortContext.ucUartNumber, MB_SERIAL_BUF_SIZE, MB_SERIAL_BUF_SIZE,
+                                    MB_QUEUE_LENGTH, &xPortContext.xMbUartQueue, MB_PORT_SERIAL_ISR_FLAG);
     MB_PORT_CHECK((xErr == ESP_OK), FALSE,
             "mb serial driver failure, uart_driver_install() returned (0x%x).", xErr);
     // Set timeout for TOUT interrupt (T3.5 modbus time)
-    xErr = uart_set_rx_timeout(ucUartNumber, MB_SERIAL_TOUT);
+    xErr = uart_set_rx_timeout(xPortContext.ucUartNumber, MB_SERIAL_TOUT);
     MB_PORT_CHECK((xErr == ESP_OK), FALSE,
             "mb serial set rx timeout failure, uart_set_rx_timeout() returned (0x%x).", xErr);
 
     // Set always timeout flag to trigger timeout interrupt even after rx fifo full
-    uart_set_always_rx_timeout(ucUartNumber, true);
-
+    uart_set_always_rx_timeout(xPortContext.ucUartNumber, true);
+    MB_PORT_CHECK((xMBMasterPortRxSemaInit()), FALSE,
+                        "mb serial RX semaphore create fail.");
     // Create a task to handle UART events
     BaseType_t xStatus = xTaskCreatePinnedToCore(vUartTask, "uart_queue_task",
                                                     MB_SERIAL_TASK_STACK_SIZE,
                                                     NULL, MB_SERIAL_TASK_PRIO,
-                                                    &xMbTaskHandle, MB_PORT_TASK_AFFINITY);
+                                                    &xPortContext.xMbTaskHandle, MB_PORT_TASK_AFFINITY);
     if (xStatus != pdPASS) {
-        vTaskDelete(xMbTaskHandle);
+        vTaskDelete(xPortContext.xMbTaskHandle);
         // Force exit from function with failure
         MB_PORT_CHECK(FALSE, FALSE,
                 "mb stack serial task creation error. xTaskCreate() returned (0x%x).",
                 xStatus);
     } else {
-        vTaskSuspend(xMbTaskHandle); // Suspend serial task while stack is not started
+        vTaskSuspend(xPortContext.xMbTaskHandle); // Suspend serial task while stack is not started
     }
     ESP_LOGD(MB_PORT_TAG,"%s Init serial.", __func__);
     return TRUE;
@@ -270,22 +391,18 @@ BOOL xMBMasterPortSerialInit( UCHAR ucPORT, ULONG ulBaudRate, UCHAR ucDataBits, 
 
 void vMBMasterPortSerialClose(void)
 {
-    (void)vTaskDelete(xMbTaskHandle);
-    ESP_ERROR_CHECK(uart_driver_delete(ucUartNumber));
+    (void)vTaskDelete(xPortContext.xMbTaskHandle);
+    ESP_ERROR_CHECK(uart_driver_delete(xPortContext.ucUartNumber));
 }
 
+// The functions belos are just placeholders now (will not be used)
 BOOL xMBMasterPortSerialPutByte(CHAR ucByte)
 {
-    // Send one byte to UART transmission buffer
-    // This function is called by Modbus stack
-    UCHAR ucLength = uart_write_bytes(ucUartNumber, &ucByte, 1);
-    return (ucLength == 1);
+    return TRUE;
 }
 
 // Get one byte from intermediate RX buffer
 BOOL xMBMasterPortSerialGetByte(CHAR* pucByte)
 {
-    assert(pucByte != NULL);
-    USHORT usLength = uart_read_bytes(ucUartNumber, (uint8_t*)pucByte, 1, MB_SERIAL_RX_TOUT_TICKS);
-    return (usLength == 1);
+    return TRUE;
 }

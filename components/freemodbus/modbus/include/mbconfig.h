@@ -1,4 +1,11 @@
 /*
+ * SPDX-FileCopyrightText: 2006 Christian Walter
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * SPDX-FileContributor: 2016-2021 Espressif Systems (Shanghai) CO LTD
+ */
+/*
  * FreeModbus Libary: A portable Modbus implementation for Modbus ASCII/RTU.
  * Copyright (c) 2006 Christian Walter <wolti@sil.at>
  * All rights reserved.
@@ -34,6 +41,10 @@
 
 #include "sdkconfig.h" // for KConfig options
 
+#if __has_include("esp_idf_version.h")
+#include "esp_idf_version.h"
+#endif
+
 #ifdef __cplusplus
 PR_BEGIN_EXTERN_C
 #endif
@@ -64,6 +75,15 @@ PR_BEGIN_EXTERN_C
 
 #if !CONFIG_FMB_COMM_MODE_ASCII_EN && !CONFIG_FMB_COMM_MODE_RTU_EN && !MB_MASTER_TCP_ENABLED && !MB_TCP_ENABLED
 #error "None of Modbus communication mode is enabled. Please enable one of (ASCII, RTU, TCP) mode in Kconfig."
+#endif
+
+#ifdef ESP_IDF_VERSION
+
+#if (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 0))
+// Features supported from 4.4
+#define MB_TIMER_SUPPORTS_ISR_DISPATCH_METHOD 1
+#endif
+
 #endif
 
 /*! \brief This option defines the number of data bits per ASCII character.
@@ -147,7 +167,7 @@ PR_BEGIN_EXTERN_C
 #define MB_FUNC_READWRITE_HOLDING_ENABLED       (  1 )
 
 /*! \brief Check the option to place timer handler into IRAM */
-#define MB_PORT_TIMER_ISR_IN_IRAM                          (  CONFIG_FMB_TIMER_ISR_IN_IRAM )
+#define MB_PORT_TIMER_ISR_IN_IRAM               (  CONFIG_FMB_TIMER_ISR_IN_IRAM )
 
 /*! @} */
 #ifdef __cplusplus

@@ -1,16 +1,7 @@
-/* Copyright 2018 Espressif Systems (Shanghai) PTE LTD
+/*
+ * SPDX-FileCopyrightText: 2016-2022 Espressif Systems (Shanghai) CO LTD
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 // mbc_tcp_master.c
@@ -90,11 +81,12 @@ static void mbc_tcp_master_free_slave_list(void)
     // Initialize interface properties
     mb_master_options_t* mbm_opts = &mbm_interface_ptr->opts;
 
-    LIST_FOREACH(it, &mbm_opts->mbm_slave_list, entries) {
+    while ((it = LIST_FIRST(&mbm_opts->mbm_slave_list))) {
         LIST_REMOVE(it, entries);
         mbm_opts->mbm_slave_list_count--;
         free(it);
     }
+
 }
 
 // Modbus event processing task
@@ -168,7 +160,7 @@ static esp_err_t mbc_tcp_master_start(void)
 
     status = eMBMasterEnable();
     MB_MASTER_CHECK((status == MB_ENOERR), ESP_ERR_INVALID_STATE,
-                    "mb stack set slave ID failure, eMBMasterEnable() returned (0x%x).", (uint32_t)status);
+                    "mb stack enable failure, eMBMasterEnable() returned (0x%x).", (uint32_t)status);
 
     // Add slave IP address for each slave to initialize connection
     mb_slave_addr_entry_t *p_slave_info;
@@ -181,13 +173,12 @@ static esp_err_t mbc_tcp_master_start(void)
     // Add end of list condition
     (void)xMBTCPPortMasterAddSlaveIp(0xFF, NULL, 0xFF);
 
-
     // Wait for connection done event
     bool start = (bool)xMBTCPPortMasterWaitEvent(mbm_opts->mbm_event_group,
-                                                 (EventBits_t)MB_EVENT_STACK_STARTED, MB_TCP_CONNECTION_TOUT);
+                                                    (EventBits_t)MB_EVENT_STACK_STARTED, MB_TCP_CONNECTION_TOUT);
     MB_MASTER_CHECK((start), ESP_ERR_INVALID_STATE,
-                    "mb stack could not connect to slaves for %d seconds.",
-                    CONFIG_FMB_TCP_CONNECTION_TOUT_SEC);
+                            "mb stack could not connect to slaves for %d seconds.",
+                            CONFIG_FMB_TCP_CONNECTION_TOUT_SEC);
     return ESP_OK;
 }
 

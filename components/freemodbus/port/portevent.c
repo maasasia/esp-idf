@@ -1,16 +1,9 @@
-/* Copyright 2018 Espressif Systems (Shanghai) PTE LTD
+/*
+ * SPDX-FileCopyrightText: 2010 Christian Walter
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileContributor: 2016-2022 Espressif Systems (Shanghai) CO LTD
  */
 /*
  * FreeModbus Libary: ESP32 Port Demo Application
@@ -54,7 +47,7 @@
 #include "sdkconfig.h"
 #include "port_serial_slave.h"
 /* ----------------------- Variables ----------------------------------------*/
-static xQueueHandle xQueueHdl;
+static QueueHandle_t xQueueHdl;
 
 #define MB_EVENT_QUEUE_SIZE     (6)
 #define MB_EVENT_QUEUE_TIMEOUT  (pdMS_TO_TICKS(CONFIG_FMB_EVENT_QUEUE_TIMEOUT))
@@ -120,7 +113,7 @@ xMBPortEventGet(eMBEventType * peEvent)
     return xEventHappened;
 }
 
-xQueueHandle
+QueueHandle_t
 xMBPortEventGetHandle(void)
 {
     if(xQueueHdl != NULL)

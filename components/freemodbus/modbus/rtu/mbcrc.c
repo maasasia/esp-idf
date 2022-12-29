@@ -1,4 +1,11 @@
 /*
+ * SPDX-FileCopyrightText: 2006 Christian Walter
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * SPDX-FileContributor: 2016-2021 Espressif Systems (Shanghai) CO LTD
+ */
+/*
  * FreeModbus Libary: A portable Modbus implementation for Modbus ASCII/RTU.
  * Copyright (c) 2006 Christian Walter <wolti@sil.at>
  * All rights reserved.
@@ -32,7 +39,7 @@
 #include "port.h"
 #include "mbconfig.h"
 
-#if MB_MASTER_RTU_ENABLED || MB_SLAVE_RTU_ENABLED
+#if (MB_MASTER_RTU_ENABLED || MB_SLAVE_RTU_ENABLED || CONFIG_MB_UTEST)
 
 static const UCHAR aucCRCHi[] = {
     0x00, 0xC1, 0x81, 0x40, 0x01, 0xC0, 0x80, 0x41, 0x01, 0xC0, 0x80, 0x41,
@@ -84,7 +91,7 @@ static const UCHAR aucCRCLo[] = {
     0x41, 0x81, 0x80, 0x40
 };
 
-USHORT
+USHORT __attribute__((unused))
 usMBCRC16( UCHAR * pucFrame, USHORT usLen )
 {
     UCHAR           ucCRCHi = 0xFF;

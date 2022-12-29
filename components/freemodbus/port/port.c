@@ -1,16 +1,9 @@
-/* Copyright 2018 Espressif Systems (Shanghai) PTE LTD
+/*
+ * SPDX-FileCopyrightText: 2013 Armink
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileContributor: 2016-2021 Espressif Systems (Shanghai) CO LTD
  */
 /*
  * FreeModbus Libary: ESP32 Port
@@ -45,6 +38,7 @@
 
 /* ----------------------- Modbus includes ----------------------------------*/
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "sys/lock.h"
 #include "port.h"
 
@@ -78,6 +72,61 @@ vMBPortSetMode( UCHAR ucMode )
     ucPortMode = ucMode;
     EXIT_CRITICAL_SECTION();
 }
+
+#if MB_MASTER_RTU_ENABLED || MB_MASTER_ASCII_ENABLED || MB_SLAVE_RTU_ENABLED || MB_SLAVE_ASCII_ENABLED
+
+BOOL xMBPortSerialWaitEvent(QueueHandle_t xMbUartQueue, uart_event_t* pxEvent, ULONG xTimeout)
+{
+    BOOL xResult = (BaseType_t)xQueueReceive(xMbUartQueue, (void*)pxEvent, (TickType_t) xTimeout);
+    ESP_LOGD(MB_PORT_TAG, "%s, UART event: %d ", __func__, pxEvent->type);
+    return xResult;
+}
+
+#endif
+
+#if MB_MASTER_RTU_ENABLED || MB_MASTER_ASCII_ENABLED
+
+/*
+ * The function is called from ASCII/RTU module to get processed data buffer. Sets the
+ * received buffer and its length using parameters.
+ */
+__attribute__ ((weak))
+BOOL xMBMasterPortSerialGetResponse( UCHAR **ppucMBSerialFrame, USHORT * usSerialLength ) 
+{
+    ESP_LOGD(MB_PORT_TAG, " %s default", __func__);
+    return TRUE;
+}
+
+/*
+ * The function is called from ASCII/RTU module to set processed data buffer
+ * to be sent in transmitter state machine.
+ */
+__attribute__ ((weak))
+BOOL xMBMasterPortSerialSendRequest( UCHAR *pucMBSerialFrame, USHORT usSerialLength )
+{
+    ESP_LOGD(MB_PORT_TAG, "%s default", __func__);
+    return TRUE;
+}
+
+#endif
+
+#if MB_SLAVE_RTU_ENABLED || MB_SLAVE_ASCII_ENABLED
+
+__attribute__ ((weak))
+BOOL xMBPortSerialGetRequest( UCHAR **ppucMBSerialFrame, USHORT * usSerialLength )
+{
+    ESP_LOGD(MB_PORT_TAG, "%s default", __func__);
+    return TRUE;
+}
+
+__attribute__ ((weak))
+BOOL xMBPortSerialSendResponse( UCHAR *pucMBSerialFrame, USHORT usSerialLength )
+{
+    ESP_LOGD(MB_PORT_TAG, "%s default", __func__);
+    return TRUE;
+}
+
+#endif
 
 #if MB_TCP_DEBUG
 

@@ -1,4 +1,11 @@
 /*
+ * SPDX-FileCopyrightText: 2006 Christian Walter
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * SPDX-FileContributor: 2016-2021 Espressif Systems (Shanghai) CO LTD
+ */
+/*
  * FreeModbus Libary: A portable Modbus implementation for Modbus ASCII/RTU.
  * Copyright (c) 2006 Christian Walter <wolti@sil.at>
  * All rights reserved.
@@ -79,6 +86,12 @@ PR_BEGIN_EXTERN_C
 #define MB_TCP_LEN              4
 #define MB_TCP_UID              6
 #define MB_TCP_FUNC             7
+
+#if MB_MASTER_TCP_ENABLED
+#define MB_SEND_BUF_PDU_OFF     MB_TCP_FUNC
+#else
+#define MB_SEND_BUF_PDU_OFF     MB_SER_PDU_PDU_OFF
+#endif
 
 #define MB_TCP_PSEUDO_ADDRESS 255
 

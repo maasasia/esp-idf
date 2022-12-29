@@ -1,16 +1,7 @@
-/* Copyright 2018 Espressif Systems (Shanghai) PTE LTD
+/*
+ * SPDX-FileCopyrightText: 2016-2022 Espressif Systems (Shanghai) CO LTD
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 // mbc_serial_master.c
@@ -39,7 +30,7 @@ extern BOOL xMBMasterPortSerialTxPoll(void);
 #define MB_RESPONSE_TICS pdMS_TO_TICKS(CONFIG_FMB_MASTER_TIMEOUT_MS_RESPOND + 10)
 
 
-static mb_master_interface_t* mbm_interface_ptr = NULL; //&default_interface_inst;
+static mb_master_interface_t* mbm_interface_ptr = NULL;
 static const char *TAG = "MB_CONTROLLER_MASTER";
 
 // Modbus event processing task
@@ -60,11 +51,11 @@ static void modbus_master_task(void *pvParameters)
         if (status & MB_EVENT_STACK_STARTED) {
             (void)eMBMasterPoll(); // Allow stack to process data
             // Send response buffer if ready to be sent
-            BOOL xSentState = xMBMasterPortSerialTxPoll();
-            if (xSentState) {
-                // Let state machine know that response was transmitted out
-                (void)xMBMasterPortEventPost(EV_MASTER_FRAME_SENT);
-            }
+            // BOOL xSentState = xMBMasterPortSerialTxPoll();
+            // if (xSentState) {
+            //     // Let state machine know that request frame was transmitted out
+            //     (void)xMBMasterPortEventPost(EV_MASTER_FRAME_SENT);
+            // }
         }
     }
 }
@@ -110,7 +101,7 @@ static esp_err_t mbc_serial_master_start(void)
             "mb stack initialization failure, eMBInit() returns (0x%x).", status);
     status = eMBMasterEnable();
     MB_MASTER_CHECK((status == MB_ENOERR), ESP_ERR_INVALID_STATE,
-            "mb stack set slave ID failure, eMBEnable() returned (0x%x).", (uint32_t)status);
+            "mb stack set slave ID failure, eMBMasterEnable() returned (0x%x).", (uint32_t)status);
     // Set the mbcontroller start flag
     EventBits_t flag = xEventGroupSetBits(mbm_opts->mbm_event_group,
                                             (EventBits_t)MB_EVENT_STACK_STARTED);

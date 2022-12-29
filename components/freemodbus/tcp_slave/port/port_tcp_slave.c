@@ -1,17 +1,10 @@
-/* Copyright 2018 Espressif Systems (Shanghai) PTE LTD
+/*
+ * SPDX-FileCopyrightText: 2006 Christian Walter
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * SPDX-License-Identifier: BSD-3-Clause
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
-*/
+ * SPDX-FileContributor: 2016-2022 Espressif Systems (Shanghai) CO LTD
+ */
 /*
  * FreeModbus Libary: ESP32 TCP Port
  * Copyright (C) 2006 Christian Walter <wolti@sil.at>
@@ -46,6 +39,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "esp_err.h"
+#include "esp_timer.h"
 #include "sys/time.h"
 #include "esp_netif.h"
 
@@ -67,7 +61,7 @@
 
 /* ----------------------- Defines  -----------------------------------------*/
 #define MB_TCP_DISCONNECT_TIMEOUT       ( CONFIG_FMB_TCP_CONNECTION_TOUT_SEC * 1000000 ) // disconnect timeout in uS
-#define MB_TCP_RESP_TIMEOUT_MS          ( MB_MASTER_TIMEOUT_MS_RESPOND - 2 ) // slave response time limit
+#define MB_TCP_RESP_TIMEOUT_MS          ( MB_MASTER_TIMEOUT_MS_RESPOND - 1 ) // slave response time limit
 #define MB_TCP_NET_LISTEN_BACKLOG       ( SOMAXCONN )
 
 /* ----------------------- Prototypes ---------------------------------------*/
@@ -76,6 +70,7 @@ void vMBPortEventClose( void );
 /* ----------------------- Static variables ---------------------------------*/
 static const char *TAG = "MB_TCP_SLAVE_PORT";
 static int xListenSock = -1;
+static SemaphoreHandle_t xShutdownSemaphore = NULL;
 static MbSlavePortConfig_t xConfig = { 0 };
 
 /* ----------------------- Static functions ---------------------------------*/
@@ -92,19 +87,19 @@ static void vxMBTCPPortMStoTimeVal(USHORT usTimeoutMs, struct timeval *pxTimeout
     pxTimeout->tv_usec = (usTimeoutMs - (pxTimeout->tv_sec * 1000)) * 1000;
 }
 
-static xQueueHandle xMBTCPPortRespQueueCreate(void)
+static QueueHandle_t xMBTCPPortRespQueueCreate(void)
 {
-    xQueueHandle xRespQueueHandle = xQueueCreate(2, sizeof(void*));
+    QueueHandle_t xRespQueueHandle = xQueueCreate(2, sizeof(void*));
     MB_PORT_CHECK((xRespQueueHandle != NULL), NULL, "TCP respond queue creation failure.");
     return xRespQueueHandle;
 }
 
-static void vMBTCPPortRespQueueDelete(xQueueHandle xRespQueueHandle)
+static void vMBTCPPortRespQueueDelete(QueueHandle_t xRespQueueHandle)
 {
     vQueueDelete(xRespQueueHandle);
 }
 
-static void* vxMBTCPPortRespQueueRecv(xQueueHandle xRespQueueHandle)
+static void* vxMBTCPPortRespQueueRecv(QueueHandle_t xRespQueueHandle)
 {
     void* pvResp = NULL;
     MB_PORT_CHECK(xRespQueueHandle != NULL, NULL, "Response queue is not initialized.");
@@ -116,7 +111,7 @@ static void* vxMBTCPPortRespQueueRecv(xQueueHandle xRespQueueHandle)
     return pvResp;
 }
 
-static BOOL vxMBTCPPortRespQueueSend(xQueueHandle xRespQueueHandle, void* pvResp)
+static BOOL vxMBTCPPortRespQueueSend(QueueHandle_t xRespQueueHandle, void* pvResp)
 {
     MB_PORT_CHECK(xRespQueueHandle != NULL, FALSE, "Response queue is not initialized.");
     BaseType_t xStatus = xQueueSend(xConfig.xRespQueueHandle,
@@ -155,12 +150,13 @@ xMBTCPPortInit( USHORT usTCPPort )
     xConfig.pcBindAddr = NULL;
 
     // Create task for packet processing
-    BaseType_t xErr = xTaskCreate(vMBTCPPortServerTask,
-                                    "tcp_server_task",
+    BaseType_t xErr = xTaskCreatePinnedToCore(vMBTCPPortServerTask,
+                                    "tcp_slave_task",
                                     MB_TCP_STACK_SIZE,
                                     NULL,
                                     MB_TCP_TASK_PRIO,
-                                    &xConfig.xMbTcpTaskHandle);
+                                    &xConfig.xMbTcpTaskHandle,
+                                    MB_PORT_TASK_AFFINITY);
     vTaskSuspend(xConfig.xMbTcpTaskHandle);
     if (xErr != pdTRUE)
     {
@@ -469,6 +465,11 @@ static void vMBTCPPortServerTask(void *pvParameters)
             // Wait for an activity on one of the sockets, timeout is NULL, so wait indefinitely
             xErr = select(xMaxSd + 1 , &xReadSet , NULL , NULL , NULL);
             if ((xErr < 0) && (errno != EINTR)) {
+                // First check if the task is not flagged for shutdown
+                if (xListenSock == -1 && xShutdownSemaphore) {
+                    xSemaphoreGive(xShutdownSemaphore);
+                    vTaskDelete(NULL);
+                }
                 // error occurred during wait for read
                 ESP_LOGE(TAG, "select() errno = %d.", errno);
                 continue;
@@ -560,6 +561,12 @@ static void vMBTCPPortServerTask(void *pvParameters)
                                                                             pxClientInfo->xSockId, pxClientInfo->pcIpAddr, xErr);
                                         break;
                                 }
+                                
+                                if (xShutdownSemaphore) {
+                                    xSemaphoreGive(xShutdownSemaphore);
+                                    vTaskDelete(NULL);
+                                }
+
                                 // Close client connection
                                 xMBTCPPortCloseConnection(pxClientInfo);
 
@@ -633,8 +640,22 @@ void
 vMBTCPPortClose( )
 {
     // Release resources for the event queue.
+
+    // Try to exit the task gracefully, so select could release its internal callbacks
+    // that were allocated on the stack of the task we're going to delete
+    xShutdownSemaphore = xSemaphoreCreateBinary();
+    vTaskResume(xConfig.xMbTcpTaskHandle);
+    if (xShutdownSemaphore == NULL || // if no semaphore (alloc issues) or couldn't acquire it, just delete the task
+        xSemaphoreTake(xShutdownSemaphore, 2*pdMS_TO_TICKS(CONFIG_FMB_MASTER_TIMEOUT_MS_RESPOND)) != pdTRUE) {
+        ESP_LOGE(TAG, "Task couldn't exit gracefully within timeout -> abruptly deleting the task");
+        vTaskDelete(xConfig.xMbTcpTaskHandle);
+    }
+    if (xShutdownSemaphore) {
+        vSemaphoreDelete(xShutdownSemaphore);
+        xShutdownSemaphore = NULL;
+    }
+
     vMBPortEventClose( );
-    vTaskDelete(xConfig.xMbTcpTaskHandle);
 }
 
 void vMBTCPPortEnable( void )
